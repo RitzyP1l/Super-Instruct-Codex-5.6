@@ -425,6 +425,13 @@ body {
 
 /* ═══ 中转站编辑 ═══ */
 .cfg-relay-edit { display: flex; gap: 8px; padding: 14px 16px; align-items: center; }
+.cfg-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px 16px 4px; }
+.cfg-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-3); font-size: 12px; }
+.cfg-field:nth-child(2), .cfg-field:nth-child(4) { grid-column: span 1; }
+.cfg-field .cfg-input { width: 100%; box-sizing: border-box; }
+.cfg-model-row { display: flex; gap: 8px; align-items: center; }
+.cfg-model-row .cfg-input { min-width: 0; }
+.cfg-model-row .btn { flex: 0 0 auto; white-space: nowrap; }
 .cfg-input {
     flex: 1;
     background: var(--panel-flat);
@@ -439,6 +446,7 @@ body {
 }
 .cfg-input:focus { border-color: var(--c-crack); background: #fff; }
 .cfg-input::placeholder { color: var(--text-4); }
+@media (max-width: 760px) { .cfg-form { grid-template-columns: 1fr; } }
 .cfg-relay-hint {
     padding: 0 16px 10px;
     font-size: 11px;

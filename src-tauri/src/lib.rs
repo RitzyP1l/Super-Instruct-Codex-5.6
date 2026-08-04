@@ -2,6 +2,7 @@
 // MITM Core 作为 Tauri 后端进程运行，前端通过事件系统接收实时数据
 
 pub mod core;
+pub mod codex_app;
 pub mod deploy;
 pub mod extensions;
 pub mod log;
@@ -33,6 +34,8 @@ pub struct AppState {
     proxy_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
     monitor: RwLock<Option<Arc<MonitorPanel>>>,
     memory: RwLock<Option<Arc<MemoryKernel>>>,
+    proxy_port: RwLock<Option<u16>>,
+    proxy_target: RwLock<Option<String>>,
 }
 
 impl AppState {
@@ -42,6 +45,8 @@ impl AppState {
             proxy_handle: RwLock::new(None),
             monitor: RwLock::new(None),
             memory: RwLock::new(None),
+            proxy_port: RwLock::new(None),
+            proxy_target: RwLock::new(None),
         }
     }
 }
@@ -84,36 +89,6 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // BUG-7 修复: 启动时检测残留部署 — 上次非正常退出时 config.toml 仍指向代理
-            if let Some(manager) = DeployManager::new() {
-                let status = manager.status();
-                if status.config_backed_up {
-                    tracing::warn!(
-                        "startup: residual deployment detected (bridge_active={}, backup exists), auto-restoring",
-                        status.bridge_active
-                    );
-                    match manager.restore() {
-                        Ok(msg) => {
-                            tracing::info!("startup: auto-restore succeeded: {}", msg);
-                            let _ = app.emit("interaction", InteractionEvent {
-                                id: 0,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                                category: "system".into(),
-                                user_preview: "残留部署检测".into(),
-                                ai_preview: format!("检测到上次未正常关闭，已自动恢复 Codex 配置 ({})", msg),
-                                thinking_preview: String::new(),
-                                tampered: false,
-                                bytes: 0,
-                                duration_ms: 0,
-                            });
-                        }
-                        Err(e) => tracing::error!("startup: auto-restore failed: {}", e),
-                    }
-                } else {
-                    tracing::debug!("startup: no residual deployment detected");
-                }
-            }
-
             // 系统托盘
             let show_item = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
@@ -133,17 +108,6 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            // 退出前恢复 Codex 配置，避免 config.toml 残留代理指向
-                            if let Some(manager) = DeployManager::new() {
-                                let status = manager.status();
-                                if status.config_backed_up || status.bridge_active {
-                                    tracing::info!("quit: restoring codex config before exit");
-                                    match manager.restore() {
-                                        Ok(msg) => tracing::info!("quit: restore succeeded: {}", msg),
-                                        Err(e) => tracing::error!("quit: restore failed: {}", e),
-                                    }
-                                }
-                            }
                             // 先销毁窗口再退出，避免 Chromium "Failed to unregister class" Error 1412
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.destroy();
@@ -169,6 +133,10 @@ pub fn run() {
             get_proxy_status,
             get_codex_info,
             set_relay_url,
+            fetch_available_models,
+            launch_isolated_codex,
+            remove_isolated_codex_profile,
+            get_isolated_profile_info,
             list_skills,
             toggle_skill,
             toggle_all_skills,
@@ -230,6 +198,198 @@ async fn probe_api_prefix(url: &str) -> String {
             trimmed.to_string()
         }
     }
+}
+
+#[tauri::command]
+async fn fetch_available_models(
+    upstream_url: String,
+    api_key: String,
+) -> Result<codex_app::ModelListResult, String> {
+    let upstream = upstream_url.trim();
+    if !upstream.starts_with("http://") && !upstream.starts_with("https://") {
+        return Err("上游地址必须以 http:// 或 https:// 开头".into());
+    }
+    if upstream.contains("127.0.0.1") || upstream.contains("localhost") {
+        return Err("上游地址不能指向本地代理自身".into());
+    }
+    if api_key.trim().is_empty() {
+        return Err("请先填写 API Key".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("创建模型查询客户端失败: {e}"))?;
+    let mut failures = Vec::new();
+
+    for (base_url, endpoint) in codex_app::model_endpoint_candidates(upstream) {
+        let response = match client
+            .get(&endpoint)
+            .bearer_auth(api_key.trim())
+            .header("accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                failures.push(format!("{endpoint}: {e}"));
+                continue;
+            }
+        };
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(format!("模型接口返回 {status}，请检查 API Key 权限"));
+        }
+        if !status.is_success() {
+            failures.push(format!("{endpoint}: HTTP {status}"));
+            continue;
+        }
+        let value = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("模型接口返回的 JSON 解析失败: {e}"))?;
+        let models = codex_app::extract_model_ids(&value);
+        if models.is_empty() {
+            failures.push(format!("{endpoint}: 响应中没有模型 ID"));
+            continue;
+        }
+        tracing::info!("models: fetched {} model ids from {}", models.len(), endpoint);
+        return Ok(codex_app::ModelListResult { base_url, models });
+    }
+
+    Err(format!("获取模型列表失败：{}", failures.join("；")))
+}
+
+/// 启动供独立 Codex 配置共享的动态端口代理；不同 API Key 由各子进程请求头携带。
+async fn ensure_isolated_proxy(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    target: &str,
+) -> Result<u16, String> {
+    if state.core.read().await.is_some() {
+        let active_target = state.proxy_target.read().await.clone();
+        let active_port = *state.proxy_port.read().await;
+        return match (active_target, active_port) {
+            (Some(existing), Some(port)) if existing == target => Ok(port),
+            (Some(existing), _) => Err(format!("代理当前连接到 {existing}；请先停止代理，再切换上游地址")),
+            _ => Err("代理状态不完整，请停止后重试".into()),
+        };
+    }
+
+    let instructions = match resolve_resource_file(app, "bridge.md") {
+        Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|_| BRIDGE_MD_FALLBACK.to_string()),
+        Err(_) => BRIDGE_MD_FALLBACK.to_string(),
+    };
+    let monitor = Arc::new(MonitorPanel::new(app.clone()));
+    let memory_path = codex_app::profiles_root()?.join("memory.json");
+    if let Some(parent) = memory_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建独立运行目录失败: {e}"))?;
+    }
+    let memory = Arc::new(MemoryKernel::new(memory_path));
+    let core = Arc::new(
+        MitmCore::builder()
+            .target(target)
+            .request_interceptor(SystemPromptInjector::new(instructions))
+            .response_parser(UniversalSseParser)
+            .response_interceptor(TamperEngine::default_rules())
+            .response_interceptor(memory.clone())
+            .response_interceptor(monitor.clone())
+            .build()
+            .map_err(|e| e.to_string())?,
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("绑定本地动态端口失败: {e}"))?;
+    let port = listener.local_addr().map_err(|e| format!("读取本地代理端口失败: {e}"))?.port();
+    let core_for_server = core.clone();
+    let handle = tokio::spawn(async move {
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(health_check))
+            .route("/{*path}", axum::routing::any(move |req| handle_proxy(req, core_for_server.clone())));
+        if let Err(e) = axum::serve(listener, router).await {
+            tracing::error!("isolated proxy stopped: {e}");
+        }
+    });
+
+    *state.core.write().await = Some(core);
+    *state.proxy_handle.write().await = Some(handle);
+    *state.monitor.write().await = Some(monitor);
+    *state.memory.write().await = Some(memory);
+    *state.proxy_port.write().await = Some(port);
+    *state.proxy_target.write().await = Some(target.to_string());
+    let _ = app.emit("proxy-status", "running");
+    tracing::info!("isolated proxy listening on 127.0.0.1:{port}");
+    Ok(port)
+}
+
+#[tauri::command]
+async fn launch_isolated_codex(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    profile_name: String,
+    upstream_url: String,
+    model: String,
+    api_key: String,
+) -> Result<codex_app::LaunchResult, String> {
+    let upstream = upstream_url.trim();
+    if !upstream.starts_with("http://") && !upstream.starts_with("https://") {
+        return Err("上游地址必须以 http:// 或 https:// 开头".into());
+    }
+    if upstream.contains("127.0.0.1") || upstream.contains("localhost") {
+        return Err("上游地址不能指向本地代理自身".into());
+    }
+    if api_key.trim().is_empty() {
+        return Err("API Key 不能为空".into());
+    }
+
+    let target = probe_api_prefix(upstream).await;
+    let port = ensure_isolated_proxy(&app, state.inner(), &target).await?;
+    let bridge_md = resolve_resource_file(&app, "bridge.md")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_else(|| BRIDGE_MD_FALLBACK.to_string());
+    let skills_dir = resolve_resource_dir(&app, "codex-skills").ok();
+    let isolated = codex_app::prepare_profile(
+        &profile_name, &model, port, &target, &bridge_md, skills_dir.as_deref(),
+    )?;
+    let result = codex_app::launch_profile(&isolated, &api_key, port)?;
+    let _ = app.emit("interaction", InteractionEvent {
+        id: 0,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "system".into(),
+        user_preview: "启动独立 Codex".into(),
+        ai_preview: format!("已启动配置 {}，PID {}，本地端口 {}", result.profile, result.pid, port),
+        thinking_preview: String::new(),
+        tampered: false,
+        bytes: 0,
+        duration_ms: 0,
+    });
+    Ok(result)
+}
+
+#[tauri::command]
+async fn remove_isolated_codex_profile(profile_name: String) -> Result<String, String> {
+    codex_app::remove_profile(&profile_name)
+}
+
+#[tauri::command]
+async fn get_isolated_profile_info(profile_name: String) -> Result<serde_json::Value, String> {
+    let profile = codex_app::profile(&profile_name)?;
+    let executable = codex_app::find_codex_executable().ok().map(|p| p.display().to_string());
+    let upstream = std::fs::read_to_string(profile.root.join("upstream_url.txt"))
+        .ok()
+        .map(|s| s.trim().to_string());
+    Ok(serde_json::json!({
+        "profile": profile.name,
+        "codex_home": profile.codex_home.display().to_string(),
+        "app_data": profile.app_data.display().to_string(),
+        "exists": profile.root.exists(),
+        "upstream_url": upstream,
+        "codex_executable": executable,
+    }))
 }
 
 #[tauri::command]
@@ -399,22 +559,8 @@ async fn stop_proxy(
     *state.core.write().await = None;
     *state.monitor.write().await = None;
     *state.memory.write().await = None;
-
-    // 自动恢复 Codex 配置：停止代理后 base_url 指向死端口会导致 Codex CLI 不可用
-    let restore_msg = if let Some(manager) = DeployManager::new() {
-        match manager.restore() {
-            Ok(msg) => {
-                tracing::info!("stop_proxy: auto-restore: {}", msg);
-                msg
-            }
-            Err(e) => {
-                tracing::warn!("stop_proxy: auto-restore failed: {}", e);
-                format!("auto-restore failed: {}", e)
-            }
-        }
-    } else {
-        "Codex home not found, skipping restore".to_string()
-    };
+    *state.proxy_port.write().await = None;
+    *state.proxy_target.write().await = None;
 
     let _ = app.emit("proxy-status", "stopped");
 
@@ -424,16 +570,16 @@ async fn stop_proxy(
         timestamp: chrono::Utc::now().to_rfc3339(),
         category: "system".into(),
         user_preview: "停止代理".into(),
-        ai_preview: format!("代理已停止，Codex 配置已自动还原 ({})", restore_msg),
+        ai_preview: "代理已停止；独立配置仍保留，现有账户配置未改动".into(),
         thinking_preview: String::new(),
         tampered: false,
         bytes: 0,
         duration_ms: 0,
     });
 
-    tracing::info!("stop_proxy: proxy stopped, codex config restored");
+    tracing::info!("stop_proxy: isolated proxy stopped");
 
-    Ok(format!("Proxy stopped, codex config restored ({})", restore_msg))
+    Ok("代理已停止；独立配置仍保留".into())
 }
 
 #[tauri::command]

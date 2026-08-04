@@ -34,12 +34,17 @@ const el = {
     btnClearLog:   $('btn-clear-log'),
     // 配置
     btnRefresh:    $('btn-refresh'),
-    btnDeploy:     $('btn-deploy'),
-    btnRestore:    $('btn-restore'),
-    btnRelaySave:  $('btn-save-relay'),
+    btnLaunchIsolated: $('btn-launch-isolated'),
+    btnRemoveProfile: $('btn-remove-profile'),
+    btnFetchModels: $('btn-fetch-models'),
     cfgCodexHome:  $('cfg-codex-home'),
+    cfgAppData:    $('cfg-app-data'),
     cfgRelayUrl:   $('cfg-relay-url'),
     cfgRelayInput: $('cfg-relay-input'),
+    cfgProfileInput: $('cfg-profile-input'),
+    cfgModelInput: $('cfg-model-input'),
+    cfgApiKeyInput: $('cfg-api-key-input'),
+    cfgProxyPort:  $('cfg-proxy-port'),
     cfgRelayMsg:   $('cfg-relay-message'),
     cfgBridgeStatus: $('cfg-bridge-status'),
     cfgMessage:    $('cfg-message'),
@@ -126,16 +131,8 @@ el.navToggleProxy.addEventListener('click', async () => {
     if (isRunning) {
         await doStopProxy();
     } else {
-        try {
-            const result = await invoke('preflight_check');
-            if (result.errors.length === 0) {
-                await doStartProxy();
-            } else {
-                showPreflight(result);
-            }
-        } catch (e) {
-            showToast(String(e), 'err');
-        }
+        switchPage('config');
+        showToast('填写实例配置后启动独立 Codex 窗口', 'ok');
     }
 });
 
@@ -283,28 +280,18 @@ el.btnClearLog.addEventListener('click', () => {
 
 async function refreshCodexInfo() {
     try {
-        const info = await invoke('get_codex_info');
-        el.cfgCodexHome.textContent = info.codex_home ?? '未检测到';
-        el.cfgRelayUrl.textContent = info.relay_url ?? '未知';
-        el.ssRelay.textContent = info.relay_url ?? '--';
-        // 同步填充编辑框（用户未在编辑时才覆盖）
-        if (document.activeElement !== el.cfgRelayInput) {
-            el.cfgRelayInput.value = info.relay_url ?? '';
+        const profileName = el.cfgProfileInput.value.trim() || 'api-account-b';
+        const info = await invoke('get_isolated_profile_info', { profileName });
+        el.cfgCodexHome.textContent = info.codex_home;
+        el.cfgAppData.textContent = info.app_data;
+        el.cfgRelayUrl.textContent = info.upstream_url ?? '尚未保存';
+        el.ssRelay.textContent = info.upstream_url ?? '--';
+        if (info.exists && info.upstream_url && !el.cfgRelayInput.value) {
+            el.cfgRelayInput.value = info.upstream_url;
         }
-
-        if (info.codex_home) {
-            try {
-                const status = await invoke('get_proxy_status');
-                el.cfgBridgeStatus.textContent = status === 'running' ? '已部署 · 代理运行中' : '已部署 · 代理未运行';
-                el.cfgBridgeStatus.className = 'cfg-v green';
-            } catch {
-                el.cfgBridgeStatus.textContent = '未知';
-                el.cfgBridgeStatus.className = 'cfg-v';
-            }
-        } else {
-            el.cfgBridgeStatus.textContent = '未检测到 Codex';
-            el.cfgBridgeStatus.className = 'cfg-v';
-        }
+        const status = await invoke('get_proxy_status');
+        el.cfgBridgeStatus.textContent = status === 'running' ? '独立代理运行中' : (info.exists ? '独立配置已创建' : '尚未创建');
+        el.cfgBridgeStatus.className = status === 'running' ? 'cfg-v green' : 'cfg-v';
     } catch (e) {
         showConfigMessage(String(e), 'err');
     }
@@ -312,47 +299,89 @@ async function refreshCodexInfo() {
 
 el.btnRefresh.addEventListener('click', refreshCodexInfo);
 
-el.btnDeploy.addEventListener('click', async () => {
+el.cfgProfileInput.addEventListener('change', refreshCodexInfo);
+
+function resetModelOptions(message = '请先获取模型列表') {
+    el.cfgModelInput.innerHTML = '';
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = message;
+    el.cfgModelInput.appendChild(option);
+    el.cfgModelInput.disabled = true;
+}
+
+el.cfgRelayInput.addEventListener('input', () => resetModelOptions());
+el.cfgApiKeyInput.addEventListener('input', () => resetModelOptions());
+
+el.btnFetchModels.addEventListener('click', async () => {
+    const upstreamUrl = el.cfgRelayInput.value.trim();
+    const apiKey = el.cfgApiKeyInput.value.trim();
+    if (!upstreamUrl || !apiKey) {
+        showRelayMessage('请先填写上游 API 地址和 API Key', 'err');
+        return;
+    }
+    const oldLabel = el.btnFetchModels.textContent;
     try {
-        const msg = await invoke('deploy_bridge');
-        showConfigMessage(msg, 'ok');
-        refreshCodexInfo();
+        el.btnFetchModels.disabled = true;
+        el.btnFetchModels.textContent = '获取中…';
+        resetModelOptions('正在获取模型…');
+        const result = await invoke('fetch_available_models', { upstreamUrl, apiKey });
+        el.cfgModelInput.innerHTML = '';
+        for (const model of result.models) {
+            const option = document.createElement('option');
+            option.value = model;
+            option.textContent = model;
+            el.cfgModelInput.appendChild(option);
+        }
+        el.cfgModelInput.disabled = false;
+        el.cfgRelayInput.value = result.base_url;
+        el.cfgRelayUrl.textContent = result.base_url;
+        el.ssRelay.textContent = result.base_url;
+        showRelayMessage(`已获取 ${result.models.length} 个可用模型`, 'ok');
     } catch (e) {
-        showConfigMessage(String(e), 'err');
+        resetModelOptions('模型获取失败，请重试');
+        showRelayMessage(String(e), 'err');
+    } finally {
+        el.btnFetchModels.disabled = false;
+        el.btnFetchModels.textContent = oldLabel;
     }
 });
 
-el.btnRestore.addEventListener('click', async () => {
-    try {
-        const msg = await invoke('restore_codex');
-        showConfigMessage(msg, 'ok');
-        refreshCodexInfo();
-    } catch (e) {
-        showConfigMessage(String(e), 'err');
-    }
-});
-
-// ── 中转站地址保存 ──────────────────────
-
-el.btnRelaySave.addEventListener('click', async () => {
-    const url = el.cfgRelayInput.value.trim();
-    if (!url) {
-        showRelayMessage('请输入中转站地址', 'err');
+el.btnLaunchIsolated.addEventListener('click', async () => {
+    const profileName = el.cfgProfileInput.value.trim();
+    const upstreamUrl = el.cfgRelayInput.value.trim();
+    const model = el.cfgModelInput.value.trim();
+    const apiKey = el.cfgApiKeyInput.value.trim();
+    if (!profileName || !upstreamUrl || !model || !apiKey) {
+        showRelayMessage('请填写配置名称、上游地址和 API Key，并获取后选择模型', 'err');
         return;
     }
     try {
-        const msg = await invoke('set_relay_url', { url });
+        el.btnLaunchIsolated.disabled = true;
+        const result = await invoke('launch_isolated_codex', { profileName, upstreamUrl, model, apiKey });
+        el.cfgApiKeyInput.value = '';
+        el.cfgCodexHome.textContent = result.codex_home;
+        el.cfgAppData.textContent = result.app_data;
+        el.cfgProxyPort.textContent = result.proxy_url;
+        setRunning(true);
+        showRelayMessage(`已启动 ${result.profile}，PID ${result.pid}`, 'ok');
+        refreshCodexInfo();
+    } catch (e) {
+        showRelayMessage(String(e), 'err');
+    } finally {
+        el.btnLaunchIsolated.disabled = false;
+    }
+});
+
+el.btnRemoveProfile.addEventListener('click', async () => {
+    const profileName = el.cfgProfileInput.value.trim();
+    if (!profileName) return;
+    try {
+        const msg = await invoke('remove_isolated_codex_profile', { profileName });
         showRelayMessage(msg, 'ok');
         refreshCodexInfo();
     } catch (e) {
         showRelayMessage(String(e), 'err');
-    }
-});
-
-// Enter 键也能保存
-el.cfgRelayInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        el.btnRelaySave.click();
     }
 });
 
@@ -377,46 +406,25 @@ function showConfigMessage(msg, type) {
 // ── 健康面板 ────────────────────────────
 
 async function refreshHealth() {
-    // Codex 环境检测
+    // 独立 Codex 环境检测
     try {
-        const info = await invoke('get_codex_info');
-        el.ssRelay.textContent = info.relay_url ?? '--';
-
-        if (info.codex_home) {
-            $('ss-codex-status').textContent = '已检测';
+        const profileName = el.cfgProfileInput.value.trim() || 'api-account-b';
+        const info = await invoke('get_isolated_profile_info', { profileName });
+        el.ssRelay.textContent = info.upstream_url ?? '--';
+        if (info.exists) {
+            $('ss-codex-status').textContent = '独立配置';
             $('ss-codex-status').style.color = 'var(--green)';
         } else {
-            $('ss-codex-status').textContent = '未检测';
-            $('ss-codex-status').style.color = 'var(--c-crack)';
+            $('ss-codex-status').textContent = '未创建';
+            $('ss-codex-status').style.color = 'var(--text-3)';
         }
     } catch {
         $('ss-codex-status').textContent = '未知';
         $('ss-codex-status').style.color = 'var(--text-3)';
     }
 
-    // 部署状态 + 破甲注入
-    try {
-        const status = await invoke('get_deploy_status');
-        if (status.codex_home_found) {
-            const proxyRunning = isRunning;
-            if (proxyRunning && status.bridge_active) {
-                $('ss-bridge-status').textContent = '已注入';
-                $('ss-bridge-status').style.color = 'var(--green)';
-            } else if (status.bridge_exists) {
-                $('ss-bridge-status').textContent = '已部署';
-                $('ss-bridge-status').style.color = 'var(--text-2)';
-            } else {
-                $('ss-bridge-status').textContent = '未部署';
-                $('ss-bridge-status').style.color = 'var(--text-3)';
-            }
-        } else {
-            $('ss-bridge-status').textContent = 'N/A';
-            $('ss-bridge-status').style.color = 'var(--text-3)';
-        }
-    } catch {
-        $('ss-bridge-status').textContent = '未知';
-        $('ss-bridge-status').style.color = 'var(--text-3)';
-    }
+    $('ss-bridge-status').textContent = isRunning ? '独立代理运行中' : '未运行';
+    $('ss-bridge-status').style.color = isRunning ? 'var(--green)' : 'var(--text-3)';
 }
 
 // ── 事件订阅 ────────────────────────────
@@ -530,12 +538,7 @@ $('btn-skills-disable-all')?.addEventListener('click', async () => {
 });
 
 $('btn-skills-redeploy')?.addEventListener('click', async () => {
-    try {
-        const msg = await invoke('deploy_bridge');
-        showToast(msg, 'ok');
-    } catch (e) {
-        showToast(String(e), 'err');
-    }
+    showToast('Skills 设置会在下次启动独立窗口时部署', 'ok');
 });
 
 // ── 初始化 ─────────────────────────────
@@ -561,10 +564,11 @@ async function init() {
         // 代理未运行，忽略
     }
 
-    // 加载 Codex 信息
+    // 加载独立 Codex 信息
     try {
-        const info = await invoke('get_codex_info');
-        el.ssRelay.textContent = info.relay_url ?? '--';
+        const profileName = el.cfgProfileInput.value.trim() || 'api-account-b';
+        const info = await invoke('get_isolated_profile_info', { profileName });
+        el.ssRelay.textContent = info.upstream_url ?? '--';
     } catch {
         // 忽略
     }

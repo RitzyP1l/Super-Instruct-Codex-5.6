@@ -19,30 +19,12 @@ pub struct DeployStatus {
     pub codex_home_found: bool,
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-}
-
 impl DeployManager {
-    /// 查找 Codex 配置目录
+    /// 返回 Super-Instruct 自己的默认隔离目录，永不回退到用户现有 ~/.codex。
     pub fn find_codex_home() -> Option<PathBuf> {
-        // CODEX_HOME 环境变量
-        if let Ok(home) = std::env::var("CODEX_HOME") {
-            let p = PathBuf::from(home);
-            if p.join("config.toml").exists() {
-                return Some(p);
-            }
-        }
-        // ~/.codex
-        if let Some(home) = home_dir() {
-            let codex = home.join(".codex");
-            if codex.join("config.toml").exists() {
-                return Some(codex);
-            }
-        }
-        None
+        let profile = crate::codex_app::profile("default").ok()?;
+        fs::create_dir_all(&profile.codex_home).ok()?;
+        Some(profile.codex_home)
     }
 
     pub fn new() -> Option<Self> {

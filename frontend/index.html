@@ -139,33 +139,32 @@
         <div class="main-content" id="page-config">
             <div class="config-scroll">
                 <div class="cfg-block">
-                    <div class="cfg-block-head">Codex 环境</div>
-                    <div class="cfg-line"><div class="cfg-k">安装路径</div><div class="cfg-v" id="cfg-codex-home">--</div></div>
-                    <div class="cfg-line"><div class="cfg-k">中转站</div><div class="cfg-v" id="cfg-relay-url">--</div></div>
-                    <div class="cfg-line"><div class="cfg-k">部署状态</div><div class="cfg-v" id="cfg-bridge-status">--</div></div>
+                    <div class="cfg-block-head">独立 Codex 实例</div>
+                    <div class="cfg-line"><div class="cfg-k">CODEX_HOME</div><div class="cfg-v" id="cfg-codex-home">--</div></div>
+                    <div class="cfg-line"><div class="cfg-k">应用数据</div><div class="cfg-v" id="cfg-app-data">--</div></div>
+                    <div class="cfg-line"><div class="cfg-k">上游地址</div><div class="cfg-v" id="cfg-relay-url">--</div></div>
+                    <div class="cfg-line"><div class="cfg-k">状态</div><div class="cfg-v" id="cfg-bridge-status">尚未启动</div></div>
                 </div>
                 <div class="cfg-block">
-                    <div class="cfg-block-head">中转站地址</div>
-                    <div class="cfg-relay-edit">
-                        <input type="text" id="cfg-relay-input" class="cfg-input" placeholder="https://your-relay-url.com/v1" autocomplete="off" spellcheck="false">
-                        <button class="btn btn-red solid" id="btn-save-relay">保存</button>
+                    <div class="cfg-block-head">实例配置</div>
+                    <div class="cfg-form">
+                        <label class="cfg-field"><span>配置名称</span><input type="text" id="cfg-profile-input" class="cfg-input" value="api-account-b" autocomplete="off" spellcheck="false"></label>
+                        <label class="cfg-field"><span>上游 API 地址</span><input type="text" id="cfg-relay-input" class="cfg-input" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></label>
+                        <label class="cfg-field"><span>API Key</span><input type="password" id="cfg-api-key-input" class="cfg-input" placeholder="仅注入本次启动的子进程，不写入磁盘" autocomplete="off" spellcheck="false"></label>
+                        <label class="cfg-field"><span>模型</span><span class="cfg-model-row"><select id="cfg-model-input" class="cfg-input" disabled><option value="">请先获取模型列表</option></select><button type="button" class="btn btn-red" id="btn-fetch-models">获取模型</button></span></label>
                     </div>
-                    <div class="cfg-relay-hint">代理启动时会自动读取此地址作为上游转发目标。请勿填 http://127.0.0.1:8080，那是本地代理端口。</div>
-                    <div class="cfg-msg" id="cfg-relay-message"></div>
-                </div>
-                <div class="cfg-block">
-                    <div class="cfg-block-head">部署操作</div>
                     <div class="cfg-ops">
-                        <button class="btn btn-red solid" id="btn-deploy">部署 bridge.md</button>
-                        <button class="btn btn-red" id="btn-restore">还原配置</button>
+                        <button class="btn btn-red solid" id="btn-launch-isolated">启动独立 Codex 窗口</button>
+                        <button class="btn btn-red" id="btn-remove-profile">删除此独立配置</button>
                     </div>
-                    <div class="cfg-msg" id="cfg-message"></div>
+                    <div class="cfg-relay-hint">先填写上游地址和 API Key，再获取该账户可用的模型。API Key 只存在于新窗口的进程环境中。</div>
+                    <div class="cfg-msg" id="cfg-relay-message"></div>
                 </div>
                 <div class="cfg-block">
                     <div class="cfg-block-head">系统信息</div>
                     <div class="cfg-line"><div class="cfg-k">篡改规则</div><div class="cfg-v">22 条（中/英/俄/日 × 4 优先级）</div></div>
                     <div class="cfg-line"><div class="cfg-k">记忆记录</div><div class="cfg-v" id="cfg-memory-count">0 条成功交互</div></div>
-                    <div class="cfg-line"><div class="cfg-k">代理端口</div><div class="cfg-v">127.0.0.1:8080</div></div>
+                    <div class="cfg-line"><div class="cfg-k">代理端口</div><div class="cfg-v" id="cfg-proxy-port">启动时动态分配</div></div>
                     <div class="cfg-line"><div class="cfg-k">SSE 修复</div><div class="cfg-v amber">已启用（response.completed 包装）</div></div>
                 </div>
             </div>
